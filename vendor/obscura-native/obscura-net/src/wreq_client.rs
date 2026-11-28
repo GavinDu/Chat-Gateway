@@ -204,6 +204,13 @@ pub struct StealthResponseHeaders {
 }
 
 #[cfg(feature = "stealth")]
+pub struct StealthStreamResponseHeaders {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: futures_util::stream::BoxStream<'static, Result<Vec<u8>, ObscuraNetError>>,
+}
+
+#[cfg(feature = "stealth")]
 impl StealthHttpClient {
     pub fn new(cookie_jar: Arc<CookieJar>) -> Self {
         Self::with_proxy(cookie_jar, None, false)
@@ -518,6 +525,24 @@ impl StealthHttpClient {
 
     /// Preserve request policy and cookie handling while deferring body reads.
     pub async fn send_single_headers_with_context(
+        &self, method: &str, url: &Url, headers: &HashMap<String, String>,
+        body: &[u8], cookie_context: Option<SameSiteContext>, store_cookies: bool,
+        max_body_bytes: usize,
+    ) -> Result<StealthResponseHeaders, ObscuraNetError> {
+        let response = self.send_single_stream_headers_with_context(method, url, headers, body, cookie_context, store_cookies, max_body_bytes).await?;
+        Ok(StealthResponseHeaders {
+            status: response.status,
+            headers: response.headers,
+            body: Box::pin(async move {
+                let mut source=response.body;
+                let mut bytes=Vec::new();
+                while let Some(chunk)=source.next().await {bytes.extend_from_slice(&chunk?);}
+                Ok(bytes)
+            }),
+        })
+    }
+
+    pub async fn send_single_stream_headers_with_context(
         &self,
         method: &str,
         url: &Url,
@@ -526,13 +551,13 @@ impl StealthHttpClient {
         cookie_context: Option<SameSiteContext>,
         store_cookies: bool,
         max_body_bytes: usize,
-    ) -> Result<StealthResponseHeaders, ObscuraNetError> {
+    ) -> Result<StealthStreamResponseHeaders, ObscuraNetError> {
         if is_tracker_blocked(url, self.block_trackers) {
             tracing::debug!("Blocked tracker: {}", url);
-            return Ok(StealthResponseHeaders {
+            return Ok(StealthStreamResponseHeaders {
                 status: 0,
                 headers: HashMap::new(),
-                body: Box::pin(async { Ok(Vec::new()) }),
+                body: Box::pin(futures_util::stream::empty()),
             });
         }
 
@@ -575,14 +600,35 @@ impl StealthHttpClient {
             .iter()
             .map(|(k, v)| (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string()))
             .collect();
+        if resp.headers().get("content-length").and_then(|value|value.to_str().ok()).and_then(|value|value.parse::<u64>().ok()).is_some_and(|length|length>max_body_bytes as u64) {
+            return Err(response_too_large(url,max_body_bytes));
+        }
         let body_url = url.clone();
-        Ok(StealthResponseHeaders {
+        Ok(StealthStreamResponseHeaders {
             status: status.as_u16(),
             headers: response_headers,
-            body: Box::pin(async move {
-                let _in_flight = in_flight;
-                read_wreq_body_limited(resp, &body_url, max_body_bytes).await
-            }),
+            body: Box::pin(futures_util::stream::try_unfold(
+                (resp.bytes_stream().boxed(), in_flight, 0usize),
+                move |(mut source, guard, mut total)| {
+                    let body_url = body_url.clone();
+                    async move {
+                        loop {
+                            match source.next().await {
+                                Some(Ok(chunk)) => {
+                                    if chunk.is_empty() { continue; }
+                                    if chunk.len() > max_body_bytes.saturating_sub(total) {
+                                        return Err(response_too_large(&body_url, max_body_bytes));
+                                    }
+                                    total += chunk.len();
+                                    return Ok(Some((chunk.to_vec(), (source, guard, total))));
+                                }
+                                Some(Err(_)) => return Err(ObscuraNetError::Network("Failed to read streaming response body".into())),
+                                None => return Ok(None),
+                            }
+                        }
+                    }
+                },
+            )),
         })
     }
 

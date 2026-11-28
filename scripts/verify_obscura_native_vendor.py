@@ -9,7 +9,7 @@ import tomllib
 root = Path(__file__).resolve().parents[1]
 upstream = Path(sys.argv[1])
 vendor = root / "vendor/obscura-native"
-names = {"obscura-net"}
+names = {"obscura-js", "obscura-net", "obscura-browser"}
 manifest = json.loads((vendor / "UPSTREAM_SHA256.json").read_text())
 actual = {
     str(path.relative_to(vendor))
@@ -37,7 +37,7 @@ packaging = tomllib.loads((vendor / "Cargo.toml").read_text())
 assert set(packaging["workspace"]["members"]) == names
 for name in names:
     assert config["patch"]["https://github.com/h4ckf0r0day/obscura"][name]["path"] == f"vendor/obscura-native/{name}"
-for name, entry in packaging["workspace"].get("dependencies", {}).items():
+for name, entry in packaging["workspace"]["dependencies"].items():
     if name.startswith("obscura-") and name not in names:
         assert entry["rev"] == revision and entry["git"] == "https://github.com/h4ckf0r0day/obscura"
 assert (vendor / "LICENSE").read_bytes() == (upstream / "LICENSE").read_bytes()
