@@ -320,6 +320,64 @@ mod tests {
     }
 
     #[test]
+    fn unpolled_stream_drop_records_once_without_content_or_error_text() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Buffer(Arc::new(Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut observed = diagnostics();
+            observed.observe_chunk(&chunk("PRIVATE_CONTENT_SENTINEL", false));
+            let body = async_stream::stream! {
+                let mut observed = observed;
+                observed.reducer_finished();
+                yield ();
+            };
+            drop(body);
+
+            let mut failed = diagnostics();
+            failed.observe(&Err(chat_backend::GatewayError::timeout(
+                "PRIVATE_ERROR_SENTINEL",
+            )));
+            failed.reducer_finished();
+        });
+
+        let logged = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logged.matches("SSE provider attempt observation").count(),
+            2
+        );
+        assert_eq!(
+            logged.matches("body_dropped_before_reducer_finish").count(),
+            1
+        );
+        assert!(logged.contains("request-test"));
+        assert!(logged.contains("Error(Timeout)"));
+        assert!(!logged.contains("PRIVATE_CONTENT_SENTINEL"));
+        assert!(!logged.contains("PRIVATE_ERROR_SENTINEL"));
+    }
+
+    #[test]
     fn admitted_first_chunk_is_observed_before_body_poll_and_not_a_commit() {
         let mut observed = diagnostics();
         observed.observe_chunk(&chunk("first", true));
