@@ -621,8 +621,10 @@ class OpenCodeCohortTests(unittest.TestCase):
             return str(uuid.uuid4())
 
         rows = []
+        comparable = {key: token() for key in ("workload", "history", "model", "config")}
         for control in COHORT_CONTROLS:
             before = {key: token() for key in COHORT_STATES}
+            before.update(comparable)
             after = dict(before)
             if control in ("client_restart", "direct_api"):
                 after["client"] = token()
@@ -665,10 +667,20 @@ class OpenCodeCohortTests(unittest.TestCase):
         self.assertFalse(report["matched_delay_within_250ms"])
         self.assertEqual(report["rows"][1]["skip_reason"], "not_authorized")
 
+    def test_delay_control_from_different_workload_is_not_a_match(self):
+        from installed_provider_smoke import validate_opencode_cohorts
+        manifest = self.manifest()
+        delay = manifest["rows"][1]
+        unrelated = str(uuid.uuid4())
+        delay["before"]["workload"] = unrelated
+        delay["after"]["workload"] = unrelated
+        self.assertFalse(validate_opencode_cohorts(manifest)["matched_delay_within_250ms"])
+
     def test_missing_control_duplicate_request_and_secret_fields_rejected(self):
         from installed_provider_smoke import validate_opencode_cohorts
         for mutation in (
             lambda m: m["rows"].pop(),
+            lambda m: m["rows"].reverse(),
             lambda m: m["rows"][1].update(
                 baseline_request_id=m["rows"][0]["baseline_request_id"]),
             lambda m: m["rows"][0].update(prompt="private-sentinel"),
