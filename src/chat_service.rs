@@ -227,19 +227,21 @@ mod attempt_diagnostics_tests {
             drop(body);
 
             let mut failed = diagnostics();
-            failed.observe(&Err(GatewayError::timeout(
-                "PRIVATE_ERROR_SENTINEL",
-            )));
+            failed.observe(&Err(GatewayError::timeout("PRIVATE_ERROR_SENTINEL")));
             failed.reducer_finished();
         });
 
         let logged = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         assert_eq!(
-            logged.matches("provider response consumer observation").count(),
+            logged
+                .matches("provider response consumer observation")
+                .count(),
             2
         );
         assert_eq!(
-            logged.matches("consumer_dropped_before_reducer_finish").count(),
+            logged
+                .matches("consumer_dropped_before_reducer_finish")
+                .count(),
             1
         );
         assert!(logged.contains("request-test"));
