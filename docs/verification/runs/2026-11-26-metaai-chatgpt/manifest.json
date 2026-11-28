@@ -1,0 +1,103 @@
+{
+  "format_version": 1,
+  "scope": "content-free measurement evidence and local operator tool snapshots",
+  "metaai_gateway_attempts": 36,
+  "metaai_protocol_complete": 30,
+  "chatgpt_requests_used": 9,
+  "chatgpt_request_cap": 12,
+  "excluded": [
+    "prompts",
+    "provider conversation transcripts",
+    "raw CLI stdout/stderr",
+    "SDK configurations and caches",
+    "cookies and token stores",
+    "private gateway clients and conversation state",
+    "vault files and keys"
+  ],
+  "files": {
+    "tools/metaai/run_opencode.py": {
+      "bytes": 13644,
+      "sha256": "059c389fc0b86f2faa4fe37201a35682a82953668a2ce3924f5a575871fe443e"
+    },
+    "tools/metaai/telemetry_identity.py": {
+      "bytes": 1455,
+      "sha256": "6d8c1692a24493de82fe3af18f85ce59e58a69928d7bccdb1b4856962c4256b0"
+    },
+    "tools/metaai/cohort_metrics.py": {
+      "bytes": 814,
+      "sha256": "74cab0782c0029b3e254c9914675b67ea785586a14f8a883a558759564c6d4d3"
+    },
+    "tools/metaai/summarize_metrics.py": {
+      "bytes": 8304,
+      "sha256": "a5add3b77a40c735d00d209054ef43d3879f5b511863ca7782d5675c6cdf2193"
+    },
+    "tools/metaai/export_metrics.py": {
+      "bytes": 5708,
+      "sha256": "219de049080b55ee0de33cc4e09f12c5db91ce71353f3f5794d9a7b67210385e"
+    },
+    "tools/metaai/test_telemetry_identity.py": {
+      "bytes": 1587,
+      "sha256": "ae5cacbc3328935d0d5473758d984e106ed6d2da49c6f403eb889ee76d865110"
+    },
+    "tools/metaai/test_cohort_metrics.py": {
+      "bytes": 1660,
+      "sha256": "47ccb5b50ce1e3637db715f616fb936ca281003dc3360f018f7007743e293e52"
+    },
+    "tools/metaai/test_proxy_measurement.py": {
+      "bytes": 3940,
+      "sha256": "27de38a74d0ed261afdd0ba1575db850b91edcd9971ea6503caa525225f43bf0"
+    },
+    "tools/chatgpt/attempt_collector.py": {
+      "bytes": 14151,
+      "sha256": "f9f95a0d780dca06dda7e8d58477b0187e5e7eb3224768e4bf7a15f89b10f61d"
+    },
+    "tools/chatgpt/test_attempt_collector.py": {
+      "bytes": 5062,
+      "sha256": "76c0fcabc497cea09b5c880245078fcb34522018f0bab6ae8830fce8f4c2e998"
+    },
+    "tools/chatgpt/test_network_projection.py": {
+      "bytes": 2309,
+      "sha256": "fba59906aea612b1949900d0932561d38519f5ad58a2d510f6dd099d7454a377"
+    },
+    "measurements/telemetry-export.zip": {
+      "bytes": 1692037,
+      "sha256": "992287cfd7501bcc9af7ed36098fc2ce4c6d5c1219f13f520ba647c6681144b1"
+    },
+    "measurements/cohort-summary.json": {
+      "bytes": 583,
+      "sha256": "19e8bba8b7431538673def0a07ea6b6020f51c948afede629c30d4ce3600cce1"
+    },
+    "measurements/calls.csv": {
+      "bytes": 10167,
+      "sha256": "c0f0c88d1d248179bc76fdccf29cc7b92960c8416444d0f55a7871922eda6089"
+    },
+    "measurements/browser-stages.csv": {
+      "bytes": 236288,
+      "sha256": "2eb6b0bb9224858d73cadecffd95d6b46ec116bda5ffa3305478d70896ddf9c6"
+    },
+    "measurements/stage-catalog.json": {
+      "bytes": 15877,
+      "sha256": "2ae83427ba19d7fab9053c2aed3541c58d7c15ee0709d16445cebf99e7b20006"
+    },
+    "measurements/improvement-plan.json": {
+      "bytes": 3827,
+      "sha256": "1db60f4a059bad5bccf2d8acb2bede5027426c8ad7470076d4e44b3d507601c3"
+    },
+    "diagnostics/content-free-diagnostic.json": {
+      "bytes": 27031,
+      "sha256": "414f0278f0081b5ffa95c733dc912ac2d73a7f3447761e794f2922057affc977"
+    },
+    "diagnostics/remember-content-free.json": {
+      "bytes": 25042,
+      "sha256": "17ecd664b0dd05c3b476a385bdacebcc12933ad4d1bb43932c7ad253a9329609"
+    },
+    "diagnostics/fresh-json-content-free.json": {
+      "bytes": 60187,
+      "sha256": "19286b20b3ff23727be2d5df90089bdce5e78ebe1c0b5602de776124bbce8805"
+    },
+    "diagnostics/fresh-json-diagnostic-summary.json": {
+      "bytes": 9984,
+      "sha256": "23c764298d15a9cf05e6217ac7131dea603c4cf5cb484c3c3e5e3e655887c1ec"
+    }
+  }
+}

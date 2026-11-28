@@ -1,0 +1,12 @@
+{
+  "source_sha": "52e35250a621872dfdb2e4dfc9bd8334c8704324",
+  "image_id": "sha256:c18de9169debb0a0d5817f617512e7d0a8518f758c7b82edfe51cfbeb9d55e90",
+  "selected_provider": "chatgpt",
+  "container": "cg-chatgpt-epic1599",
+  "canonical_test_history": "preserved",
+  "private_provider_page": "fresh; previous failed page discarded",
+  "selected_credentials": "fresh saved ChatGPT snapshot copied inside Docker; original volumes read-only",
+  "network_tap": "metadata-only",
+  "production_restarted": false,
+  "started_at_utc": "2026-11-26T13:56:12.044189+00:00"
+}

@@ -1,0 +1,18 @@
+{
+  "scope": "handoff measurement tools only",
+  "provider_requests_sent": 0,
+  "checks": {
+    "metaai": {
+      "exit_code": 0,
+      "seconds": 0.221906,
+      "summary": "......\n----------------------------------------------------------------------\nRan 6 tests in 0.007s\n\nOK"
+    },
+    "chatgpt": {
+      "exit_code": 0,
+      "seconds": 0.111965,
+      "summary": ".........\n----------------------------------------------------------------------\nRan 9 tests in 0.007s\n\nOK"
+    }
+  },
+  "status": "passed",
+  "tests_passed": 15
+}

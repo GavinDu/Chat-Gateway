@@ -1,0 +1,19 @@
+{
+  "workspace": "/workspace/cg-chatgpt-network-20261126",
+  "source_sha": "3ca15e996e7b1a6520cf221fb93e22d07657b921",
+  "phase": "feature",
+  "status": "passed",
+  "groups": [
+    "release binary identity, health and request ID",
+    "offline readiness and authenticated models",
+    "API authentication and malformed JSON rejection",
+    "Host/Origin, anonymous browser-control, role and offline revocation guards",
+    "authenticated pairing rotation, invalidation and single-use",
+    "authenticated relay status and nonce replay rejection",
+    "first-party account probe permission and honest empty-state results",
+    "admin-only metrics, long-latency buckets and bounded content-free request purpose",
+    "unpair revokes the fixture install token"
+  ],
+  "real_provider_credentials_used": false,
+  "network": "actual shared loopback namespace; no positive Host rewriting"
+}

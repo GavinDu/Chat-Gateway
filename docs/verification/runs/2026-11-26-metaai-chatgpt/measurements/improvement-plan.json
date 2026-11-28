@@ -1,0 +1,106 @@
+{
+  "target": {
+    "metric": "completed warm bounded short-output request total",
+    "seconds": 5,
+    "attained": false,
+    "opencode_tui_render_timing_measured": false
+  },
+  "observed_cohort": {
+    "attempts": 36,
+    "protocol_complete": 30,
+    "protocol_incomplete": 6,
+    "complete_total_under5": 0,
+    "timings": {
+      "first_content_s": {
+        "n": 30,
+        "min": 6.089,
+        "median": 14.716999999999999,
+        "max": 52.767
+      },
+      "generation_seconds": {
+        "n": 30,
+        "min": 3.695,
+        "median": 8.453,
+        "max": 53.473
+      },
+      "tail_wait_s": {
+        "n": 30,
+        "min": 15.31,
+        "median": 15.935500000000001,
+        "max": 17.749
+      },
+      "total_s": {
+        "n": 30,
+        "min": 29.809,
+        "median": 41.024,
+        "max": 89.74
+      }
+    }
+  },
+  "ranked_actions": [
+    {
+      "priority": 1,
+      "issue": 136,
+      "action": "Verified response-specific completion evidence",
+      "evidence": "Normal last-content-to-DONE15.310\u201317.749s; conservative idle_grace observed.",
+      "conditional_savings": "Removing measured tail is conditional on trustworthy response-specific evidence; no shipped reduction.",
+      "correctness_gates": [
+        "late fragments",
+        "long midstream pause",
+        "stale controls",
+        "identical consecutive replies",
+        "no signal fallback",
+        "cancellation",
+        "off-origin guard"
+      ]
+    },
+    {
+      "priority": 2,
+      "action": "Explain first-content and native preparation latency",
+      "evidence": "Even fastest measured first content6.089s exceeds completed-request target.",
+      "instrumentation_needed": [
+        "native fetch headers/body boundary",
+        "DNS/connect/TLS/TTFB if client exposes hooks",
+        "navigation parse/script/layout/drive attribution",
+        "remote wait remains opaque without provider evidence"
+      ]
+    },
+    {
+      "priority": 3,
+      "action": "Preserve source-output fidelity and avoid repeated failed work",
+      "evidence": "Malformed JSON and collapsed Python indentation observed separately from normal SSE termination.",
+      "measurement_needed": [
+        "strict parse/type/compiler outcomes",
+        "Root corrections",
+        "accepted implementation vs review-only vs unusable output",
+        "all failure/retry cost"
+      ]
+    },
+    {
+      "priority": 4,
+      "action": "Separate output-size classes and warm-state cohorts",
+      "constraints": "Preserve required instructions and complete outputs; large code generation has its own generation floor.",
+      "future_experiment": "Separately approved bounded paired cohort; no automatic repeat of ambiguous failures."
+    },
+    {
+      "priority": 5,
+      "action": "Measure observer overhead and resource isolation",
+      "evidence": "Prometheus collection and image attestation observed separately; full CPU overhead, RSS, cache and warm-state unknown."
+    }
+  ],
+  "interpretation_limits": [
+    "Wire total differs from CLI process duration and from unmeasured TUI render time.",
+    "Shared-production counter windows are not request-isolated traces; parent spans overlap children.",
+    "Stage sums of repeated work are not operation maxima; histograms identify operations exceeding1s.",
+    "Current engine/network boundaries are opaque, not intrinsically indivisible.",
+    "First24 jobs lack per-call image proof; first4 also lack per-call health identity.",
+    "Historical finalizer overwrote after-snapshot; exact small timing skew unmeasured and retained.",
+    "Development workload is heterogeneous; no p95/SLO or controlled reliability claim."
+  ],
+  "metaai_plan_review": {
+    "job": "measured_improvement_plan",
+    "input_attempts": 30,
+    "review_call": 31,
+    "root_reviewed": true
+  }
+}

@@ -1,0 +1,471 @@
+[
+  {
+    "stage": "navigation_before_request",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.000607,
+    "max_window_sum_s": 0.226384,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "navigation_fetch",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.06918700000000011,
+    "max_window_sum_s": 1.531116,
+    "operations_over_one_second": 2.0,
+    "children": [],
+    "atomic_boundary": "First-party fetch boundary; DNS/connect/TLS/TTFB/body child durations unavailable.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "navigation_after_response",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.11857300000000004,
+    "max_window_sum_s": 2.273980999999999,
+    "operations_over_one_second": 27.0,
+    "children": [],
+    "atomic_boundary": "Native navigation boundary; parse/script/layout/event-loop children unavailable.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "navigation_unobserved",
+    "observed_windows": 0,
+    "min_window_sum_s": null,
+    "max_window_sum_s": null,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": "Navigation observer did not expose native child events.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "retention_settle",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.06784199999999885,
+    "max_window_sum_s": 9.64835,
+    "operations_over_one_second": 5.0,
+    "children": [],
+    "atomic_boundary": "One native engine drive call; cannot divide its elapsed time without engine spans.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "retention_sleep",
+    "observed_windows": 33,
+    "min_window_sum_s": 1.1000000000000593e-05,
+    "max_window_sum_s": 0.009318999999999994,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "retention_probe",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.006123999999999796,
+    "max_window_sum_s": 0.4450410000000016,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "input_settle_engine",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.2000799999999998,
+    "max_window_sum_s": 9.633028,
+    "operations_over_one_second": 4.0,
+    "children": [],
+    "atomic_boundary": "One native engine drive call; internal task attribution unavailable.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "input_settle_sleep",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.0,
+    "max_window_sum_s": 0.01088900000000001,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "ack_settle",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.4705520000000014,
+    "max_window_sum_s": 1.295805999999999,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": "Native drive call; internal task attribution unavailable.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "ack_sleep",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.0003049999999999997,
+    "max_window_sum_s": 0.027112,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "composer_settle",
+    "observed_windows": 22,
+    "min_window_sum_s": 0.04654300000000003,
+    "max_window_sum_s": 0.6177960000000002,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": "Native drive call; internal task attribution unavailable.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "composer_sleep",
+    "observed_windows": 22,
+    "min_window_sum_s": 0.0,
+    "max_window_sum_s": 15.054223,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "composer_probe",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.0007369999999999877,
+    "max_window_sum_s": 0.145268,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "command_queue",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.00032999999999999696,
+    "max_window_sum_s": 0.012799999999999999,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "operation_gate",
+    "observed_windows": 35,
+    "min_window_sum_s": 1.4000000000000123e-05,
+    "max_window_sum_s": 0.0001749999999999998,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "page_ensure",
+    "observed_windows": 35,
+    "min_window_sum_s": 3.99999999999988e-06,
+    "max_window_sum_s": 0.0004409999999999999,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "navigation",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.22179199999999977,
+    "max_window_sum_s": 3.8078369999999993,
+    "operations_over_one_second": 33.0,
+    "children": [
+      "navigation_before_request",
+      "navigation_fetch",
+      "navigation_after_response"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "composer_ready",
+    "observed_windows": 35,
+    "min_window_sum_s": 0.000523,
+    "max_window_sum_s": 15.147555,
+    "operations_over_one_second": 2.0,
+    "children": [
+      "composer_wait",
+      "composer_probe",
+      "composer_settle",
+      "composer_sleep"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "model_selection",
+    "observed_windows": 33,
+    "min_window_sum_s": 3.999999999999989e-06,
+    "max_window_sum_s": 0.000249,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "entry_guards",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.0016820000000000168,
+    "max_window_sum_s": 0.008756,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "baseline_probe",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.006060999999999983,
+    "max_window_sum_s": 0.028536000000000006,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "submission",
+    "observed_windows": 33,
+    "min_window_sum_s": 1.120695000000012,
+    "max_window_sum_s": 21.459682000000015,
+    "operations_over_one_second": 33.0,
+    "children": [
+      "input_fill",
+      "input_settle",
+      "draft_validation",
+      "send_dispatch",
+      "submission_ack"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "composer_wait",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.000165,
+    "max_window_sum_s": 0.0007830000000000007,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "input_fill",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.0798899999999918,
+    "max_window_sum_s": 9.852711999999997,
+    "operations_over_one_second": 5.0,
+    "children": [
+      "paste_dispatch",
+      "input_retention"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "input_settle",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.20149800000000084,
+    "max_window_sum_s": 9.634972000000005,
+    "operations_over_one_second": 4.0,
+    "children": [
+      "input_settle_engine",
+      "input_settle_sleep"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "draft_validation",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.006895000000000005,
+    "max_window_sum_s": 0.484592,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "paste_dispatch",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.002742,
+    "max_window_sum_s": 0.015454000000000023,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "input_retention",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.0757640000000066,
+    "max_window_sum_s": 9.839776,
+    "operations_over_one_second": 5.0,
+    "children": [
+      "retention_probe",
+      "retention_settle",
+      "retention_sleep"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "send_dispatch",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.06476199999999999,
+    "max_window_sum_s": 0.28544899999999984,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "submission_ack",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.48493299999999806,
+    "max_window_sum_s": 1.5583029999999987,
+    "operations_over_one_second": 25.0,
+    "children": [
+      "ack_probe",
+      "ack_settle",
+      "ack_sleep"
+    ],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "ack_probe",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.014072000000000084,
+    "max_window_sum_s": 0.3307229999999999,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "browser_settle",
+    "observed_windows": 0,
+    "min_window_sum_s": null,
+    "max_window_sum_s": null,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": "Native drive call; internal task attribution unavailable.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "browser_sleep",
+    "observed_windows": 0,
+    "min_window_sum_s": null,
+    "max_window_sum_s": null,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "first_content_settle",
+    "observed_windows": 33,
+    "min_window_sum_s": 1.5862989999999968,
+    "max_window_sum_s": 97.93525800000003,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": "Native drive calls while awaiting content; remote and local work not separated.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "first_content_sleep",
+    "observed_windows": 33,
+    "min_window_sum_s": 9.999999999996123e-06,
+    "max_window_sum_s": 0.006379000000000003,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "first_content_probe",
+    "observed_windows": 33,
+    "min_window_sum_s": 0.1331910000000036,
+    "max_window_sum_s": 5.450460999999997,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "first_content_processing",
+    "observed_windows": 33,
+    "min_window_sum_s": 1.599999999999952e-05,
+    "max_window_sum_s": 0.0030669999999999994,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "after_content_settle",
+    "observed_windows": 32,
+    "min_window_sum_s": 18.504676000000018,
+    "max_window_sum_s": 80.59198900000001,
+    "operations_over_one_second": 1.0,
+    "children": [],
+    "atomic_boundary": "Native drive calls during generation and termination; remote and local work not separated.",
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "after_content_sleep",
+    "observed_windows": 32,
+    "min_window_sum_s": 0.0003489999999999882,
+    "max_window_sum_s": 0.022056,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "after_content_probe",
+    "observed_windows": 32,
+    "min_window_sum_s": 1.2269550000000038,
+    "max_window_sum_s": 13.174710000000001,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "after_content_processing",
+    "observed_windows": 32,
+    "min_window_sum_s": 0.001454999999999998,
+    "max_window_sum_s": 0.022000999999999993,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "final_probe",
+    "observed_windows": 30,
+    "min_window_sum_s": 0.007892999999999983,
+    "max_window_sum_s": 0.02152900000000002,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  },
+  {
+    "stage": "session_snapshot",
+    "observed_windows": 30,
+    "min_window_sum_s": 0.0024859999999999882,
+    "max_window_sum_s": 0.010867,
+    "operations_over_one_second": 0,
+    "children": [],
+    "atomic_boundary": null,
+    "note": "Window sums are repeated work, not individual latency maxima; parents overlap."
+  }
+]

@@ -1,0 +1,32 @@
+{
+  "attempts": 36,
+  "protocol_complete": 30,
+  "protocol_incomplete": 6,
+  "complete_total_under5": 0,
+  "timings": {
+    "first_content_s": {
+      "n": 30,
+      "min": 6.089,
+      "median": 14.716999999999999,
+      "max": 52.767
+    },
+    "generation_seconds": {
+      "n": 30,
+      "min": 3.695,
+      "median": 8.453,
+      "max": 53.473
+    },
+    "tail_wait_s": {
+      "n": 30,
+      "min": 15.31,
+      "median": 15.935500000000001,
+      "max": 17.749
+    },
+    "total_s": {
+      "n": 30,
+      "min": 29.809,
+      "median": 41.024,
+      "max": 89.74
+    }
+  }
+}

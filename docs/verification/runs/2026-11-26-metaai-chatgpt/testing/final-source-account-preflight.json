@@ -1,0 +1,13 @@
+{
+  "source": "actual fixed native command",
+  "checked_utc": "2026-11-26T13:56:11.137915+00:00",
+  "result": {
+    "provider": "chatgpt",
+    "context": "chrome_native_diagnostic",
+    "authentication": "verified",
+    "reason": "first_party_session_confirmed",
+    "http_status": 200,
+    "auth_mode": "session",
+    "exported_snapshot_verified": false
+  }
+}
