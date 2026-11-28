@@ -4122,22 +4122,41 @@ fn v12_memory_revisions_migrate_and_survive_reopen() {
             .unwrap();
         assert_eq!(item.id, original.id);
         memory
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE memory_items SET source_conversation_id=NULL
-                 WHERE owner_key_id='owner-a'",
-                [],
+            .store_turn_for_owner(
+                "owner-a",
+                "revision-source".into(),
+                vec![m("user", "source")],
+                m("assistant", "reply"),
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        memory
+            .save_long_term_memory_item(
+                "owner-a",
+                "key",
+                "value",
+                Some("revision-source"),
+                1.0,
+                None,
             )
             .unwrap();
         assert_eq!(counters(&memory, "owner-a"), (2, 2));
+        assert!(memory
+            .delete_conversation_for_owner("owner-a", "revision-source")
+            .unwrap());
+        assert_eq!(counters(&memory, "owner-a"), (2, 3));
+        assert_eq!(
+            memory.list_long_term_memory_items("owner-a").unwrap()[0].source_conversation_id,
+            None
+        );
         assert_eq!(counters(&memory, "owner-b"), (0, 0));
         let wire = serde_json::to_value(item).unwrap();
         assert!(wire.get("revision").is_none());
         assert!(wire.get("consent_epoch").is_none());
     }
     let reopened = fixture.open();
-    assert_eq!(counters(&reopened, "owner-a"), (2, 2));
+    assert_eq!(counters(&reopened, "owner-a"), (2, 3));
     assert_eq!(counters(&reopened, "owner-b"), (0, 0));
 }
 
@@ -4173,6 +4192,26 @@ fn v12_memory_revision_overflow_rolls_back_and_missing_trigger_fails_closed() {
             )
             .unwrap();
         assert_eq!(item, ("original".into(), i64::MAX));
+        connection
+            .execute(
+                "UPDATE memory_settings SET consent_epoch=?1 WHERE owner_key_id='owner-a'",
+                [i64::MAX],
+            )
+            .unwrap();
+        assert!(connection
+            .execute(
+                "UPDATE memory_settings SET enabled=0 WHERE owner_key_id='owner-a'",
+                [],
+            )
+            .is_err());
+        let settings: (bool, i64) = connection
+            .query_row(
+                "SELECT enabled, consent_epoch FROM memory_settings WHERE owner_key_id='owner-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(settings, (true, i64::MAX));
         connection
             .execute_batch("DROP TRIGGER memory_revision_on_update;")
             .unwrap();
