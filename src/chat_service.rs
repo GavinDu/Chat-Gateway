@@ -2177,8 +2177,10 @@ mod optional_memory_context_priority_tests {
             fit_personal_memory_to_candidate(prompt, vec![item.clone()], base + cost),
             vec![item.clone()]
         );
-        assert!(fit_personal_memory_to_candidate(prompt, vec![item.clone()], base + cost - 1)
-            .is_empty());
+        assert!(
+            fit_personal_memory_to_candidate(prompt, vec![item.clone()], base + cost - 1)
+                .is_empty()
+        );
         assert!(fit_personal_memory_to_candidate(prompt, vec![item], base - 1).is_empty());
         let oversized = memory_egress::PersonalMemoryItem {
             id: "oversized".into(),
@@ -2189,11 +2191,8 @@ mod optional_memory_context_priority_tests {
 
     #[tokio::test]
     async fn optional_memory_never_shrinks_the_canonical_context_or_candidate() {
-        let (_, state) = crate::real_chat_router_scripted_backend_tests::fixture(
-            &["chatgpt"],
-            vec![],
-            None,
-        );
+        let (_, state) =
+            crate::real_chat_router_scripted_backend_tests::fixture(&["chatgpt"], vec![], None);
         let owner = "memory-context-priority";
         state
             .memory
@@ -2219,10 +2218,9 @@ mod optional_memory_context_priority_tests {
         ];
         let denied = memory_egress::MemoryEgressPolicy::from_allowlist("").unwrap();
         let allowed = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt").unwrap();
-        let baseline =
-            prepare_chat_context_with_policy(&state, owner, None, &incoming, denied)
-                .await
-                .unwrap();
+        let baseline = prepare_chat_context_with_policy(&state, owner, None, &incoming, denied)
+            .await
+            .unwrap();
         let with_memory =
             prepare_chat_context_with_policy(&state, owner, None, &incoming, allowed.clone())
                 .await
