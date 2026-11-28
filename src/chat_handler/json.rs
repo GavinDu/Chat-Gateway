@@ -24,9 +24,20 @@ pub(super) async fn json_provider_response(
         receiver,
         thread_observation,
     } = attempt;
+    let mut diagnostics = chat_service::AttemptDiagnostics::new(
+        request_id.to_owned(),
+        provider.to_owned(),
+        provider_started,
+        chat_service::AttemptTransport::Json,
+    );
     let collected = state
         .chat_service
-        .collect_with_timeout(receiver, provider_started, completion_timeout)
+        .collect_with_timeout_observed(
+            receiver,
+            provider_started,
+            completion_timeout,
+            &mut diagnostics,
+        )
         .await;
     if let Some(first_content) = collected.first_event_elapsed {
         let request_ttft = provider_started
