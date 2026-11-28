@@ -752,6 +752,47 @@ async fn real_router_fails_over_after_admission_deadline_without_commit() {
 }
 
 #[tokio::test]
+async fn real_router_json_failure_retains_typed_request_diagnostic() {
+    let (app, state) = fixture(
+        &["chatgpt"],
+        vec![ScriptedSend::Events(vec![Err(GatewayError::timeout(
+            "private upstream sentinel",
+        ))])],
+        None,
+    );
+    let request_id = "5f855e0d-5b22-4a93-b925-98db841a1ee1";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-request-id", request_id)
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "chatgpt/fake-model",
+                        "stream": false,
+                        "messages": [{"role":"user","content":"synthetic prompt"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let diagnostic = state
+        .provider_sessions
+        .last_failed_request("chatgpt")
+        .expect("the typed failure must retain request correlation");
+    assert_eq!(diagnostic.request_id, request_id);
+    assert_eq!(diagnostic.stage, "json_completion");
+    assert_eq!(diagnostic.reason, "timeout");
+    let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("private upstream sentinel"));
+}
+
+#[tokio::test]
 async fn real_router_partial_json_error_never_commits_transcript() {
     let (app, state) = fixture(
         &["chatgpt"],
@@ -1026,6 +1067,68 @@ async fn real_router_client_drop_cancels_sse_and_releases_provider_permit() {
         .conversation_messages_for_owner("local", "router_drop_sse_001")
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn real_router_drop_after_content_cancels_before_independent_retry() {
+    use futures_util::StreamExt;
+
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (app, state) = fixture(
+        &["chatgpt"],
+        vec![
+            ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "discarded-first-attempt".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            ),
+            response_events("independent-retry-answer"),
+        ],
+        None,
+    );
+    let conversation = "router_drop_after_content_001";
+    let response = send(app.clone(), true, "chatgpt/fake-model", conversation).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut received = Vec::new();
+        while let Some(frame) = body.next().await {
+            received.extend_from_slice(&frame.unwrap());
+            if String::from_utf8_lossy(&received).contains("discarded-first-attempt") {
+                return;
+            }
+        }
+        panic!("stream closed before first content");
+    })
+    .await
+    .expect("first content must be observable before disconnect");
+    drop(body);
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("client drop must close the first backend receiver")
+        .expect("scripted backend must acknowledge receiver closure");
+    assert!(state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap()
+        .is_empty());
+
+    // The next request requires the same exclusive provider permit.
+    let retry = send(app, true, "chatgpt/fake-model", conversation).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let bytes = to_bytes(retry.into_body(), 65_536).await.unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("independent-retry-answer"));
+    assert!(!text.contains("discarded-first-attempt"));
+    assert!(text.contains("data: [DONE]"));
+    let messages = state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].content, "independent-retry-answer");
 }
 
 #[tokio::test]

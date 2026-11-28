@@ -22,11 +22,14 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         receiver: mut rx,
         thread_observation,
         first_chunk,
+        diagnostics,
     } = attempt;
     let conversation_for_headers = conv_stream.clone();
     let provider_for_headers = provider_c.clone();
     let identity = CompletionIdentity::new();
+    // The first chunk was observed at admission, even if the body is never polled.
     let sse_stream = async_stream::stream! {
+        let mut diagnostics = diagnostics;
         let _permit = permit;
         let mut accumulator = chat_service::ResponseAccumulator::new(provider_started_c);
         let completion_deadline =
@@ -45,7 +48,13 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         let mut pending: Option<Result<chat_backend::ChatEvent, chat_backend::GatewayError>> = Some(Ok(first_chunk));
         while let Some(item) = match pending.take() {
             Some(item) => Some(item),
-            None => chat_service::recv_with_deadline(&mut rx, completion_deadline).await,
+            None => {
+                let item = chat_service::recv_with_deadline(&mut rx, completion_deadline).await;
+                if let Some(event) = item.as_ref() {
+                    diagnostics.observe(event);
+                }
+                item
+            },
         } {
             let update = accumulator.push(item);
             let done_after_delta =
@@ -66,12 +75,13 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
                 }
                 chat_service::StreamUpdate::Complete => break,
                 chat_service::StreamUpdate::Failed => {
-                    tracing::warn!(provider = %provider_c, "provider stream failed; partial response not committed");
+                    tracing::warn!(request_id = %request_id_c, provider = %provider_c, "provider stream failed; partial response not committed");
                     break;
                 }
             }
         }
         let collected = accumulator.finish();
+        diagnostics.reducer_finished();
         let full = collected.content;
         let ttft_ms = collected
             .first_event_elapsed

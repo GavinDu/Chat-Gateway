@@ -23,10 +23,16 @@ pub(super) async fn json_provider_response(
         prompt_tokens,
         receiver,
         thread_observation,
+        mut diagnostics,
     } = attempt;
     let collected = state
         .chat_service
-        .collect_with_timeout(receiver, provider_started, completion_timeout)
+        .collect_with_timeout_observed(
+            receiver,
+            provider_started,
+            completion_timeout,
+            &mut diagnostics,
+        )
         .await;
     if let Some(first_content) = collected.first_event_elapsed {
         let request_ttft = provider_started
@@ -50,6 +56,14 @@ pub(super) async fn json_provider_response(
         state
             .provider_sessions
             .record_gateway_error(provider, &error);
+        record_safe_attempt_failure(
+            &state.provider_sessions,
+            request_id,
+            provider,
+            "json_completion",
+            safe_backend_reason(Some(error.kind)),
+            provider_started,
+        );
         let message = error.to_string();
         chat_service::record_provider_outcome(
             &state.metrics,

@@ -40,6 +40,7 @@ struct StreamingAttempt {
     thread_observation:
         Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
     first_chunk: chat_backend::ChatEvent,
+    diagnostics: chat_service::AttemptDiagnostics,
 }
 
 /// One non-streaming provider attempt. A failure before any content may be
@@ -65,6 +66,7 @@ struct JsonAttempt<'a> {
         tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
     thread_observation:
         Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
+    diagnostics: chat_service::AttemptDiagnostics,
 }
 
 // Stable fixed labels only: never put untrusted browser/provider error text
@@ -287,6 +289,16 @@ pub(super) async fn run(
         };
 
         let provider_started = Instant::now();
+        let mut diagnostics = chat_service::AttemptDiagnostics::new(
+            request_id.clone(),
+            provider_name.clone(),
+            provider_started,
+            if req.stream {
+                chat_service::AttemptTransport::Sse
+            } else {
+                chat_service::AttemptTransport::Json
+            },
+        );
         let backend_admission_started = Instant::now();
         let backend_admission = state
             .chat_service
@@ -322,8 +334,12 @@ pub(super) async fn run(
             events: mut rx,
             thread_observation,
         } = match backend_admission {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                diagnostics.backend_admitted();
+                stream
+            }
             Err(e) => {
+                diagnostics.backend_admission_failed(&e);
                 chat_service::record_backend_admission_error(
                     &state.provider_sessions,
                     &state.metrics,
@@ -349,9 +365,14 @@ pub(super) async fn run(
         let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
             let first_chunk_timeout = provider_timeout.saturating_sub(provider_started.elapsed());
-            let first = match chat_service::classify_initial_stream_event(
-                first_event(&mut rx, first_chunk_timeout).await,
-            ) {
+            let first_event = first_event(&mut rx, first_chunk_timeout).await;
+            let first_failure_reason = match &first_event {
+                chat_service::FirstEvent::Timeout => "timeout",
+                chat_service::FirstEvent::Error(error) => safe_backend_reason(Some(error.kind)),
+                _ => "unclassified",
+            };
+            diagnostics.observe_first_event(&first_event);
+            let first = match chat_service::classify_initial_stream_event(first_event) {
                 Ok(chunk) => chunk,
                 Err((message, gateway_error)) => {
                     record_attempt_error(
@@ -368,7 +389,7 @@ pub(super) async fn run(
                         &request_id,
                         &provider_name,
                         "first_stream_event",
-                        safe_backend_reason(gateway_error.as_ref().map(|e| e.kind)),
+                        first_failure_reason,
                         provider_started,
                     );
                     last_err = Some(message);
@@ -409,6 +430,7 @@ pub(super) async fn run(
                 receiver: rx,
                 thread_observation,
                 first_chunk: first_stream_chunk.expect("streaming path prefetches its first chunk"),
+                diagnostics,
             });
         }
 
@@ -433,19 +455,12 @@ pub(super) async fn run(
             prompt_tokens: estimate_tokens(&provider_prompt),
             receiver: rx,
             thread_observation,
+            diagnostics,
         })
         .await;
         match response {
             Ok(response) => return response,
             Err(message) => {
-                record_safe_attempt_failure(
-                    &state.provider_sessions,
-                    &request_id,
-                    &provider_name,
-                    "json_completion",
-                    "unclassified",
-                    provider_started,
-                );
                 last_err = Some(message);
                 continue;
             }

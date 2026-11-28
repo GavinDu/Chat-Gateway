@@ -24,6 +24,357 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+/// Transport-consumer observation only: this is not a browser cleanup acknowledgement
+/// or a durable transcript commit. Never retain provider text in the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedTerminal {
+    Pending,
+    Done,
+    Error(crate::chat_backend::GatewayErrorKind),
+    ChannelClosed,
+    FirstOutputTimeout,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AttemptPhase {
+    BackendAdmission,
+    FirstStreamEvent,
+    ResponseConsumption,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AttemptTransport {
+    Json,
+    Sse,
+}
+
+pub(crate) struct AttemptDiagnostics {
+    transport: AttemptTransport,
+    phase: AttemptPhase,
+    attempt_id: uuid::Uuid,
+    request_id: String,
+    provider: String,
+    started: Instant,
+    content_events: usize,
+    content_bytes: usize,
+    first_observed_ms: Option<u64>,
+    last_observed_ms: Option<u64>,
+    terminal: ObservedTerminal,
+    reducer_finished: bool,
+    pre_consumer_failure: bool,
+}
+
+impl AttemptDiagnostics {
+    pub(crate) fn new(
+        request_id: String,
+        provider: String,
+        started: Instant,
+        transport: AttemptTransport,
+    ) -> Self {
+        Self {
+            transport,
+            phase: AttemptPhase::BackendAdmission,
+            attempt_id: uuid::Uuid::new_v4(),
+            request_id,
+            provider,
+            started,
+            content_events: 0,
+            content_bytes: 0,
+            first_observed_ms: None,
+            last_observed_ms: None,
+            terminal: ObservedTerminal::Pending,
+            reducer_finished: false,
+            pre_consumer_failure: false,
+        }
+    }
+
+    pub(crate) fn backend_admitted(&mut self) {
+        self.record("backend_admitted");
+        self.phase = match self.transport {
+            AttemptTransport::Json => AttemptPhase::ResponseConsumption,
+            AttemptTransport::Sse => AttemptPhase::FirstStreamEvent,
+        };
+    }
+
+    pub(crate) fn backend_admission_failed(&mut self, error: &GatewayError) {
+        self.terminal = ObservedTerminal::Error(error.kind);
+        self.pre_consumer_failure = true;
+        self.record("backend_admission_failed");
+    }
+
+    pub(crate) fn observe_first_event(&mut self, first: &FirstEvent) {
+        match first {
+            FirstEvent::Chunk(chunk) => {
+                self.observe_chunk(chunk);
+                self.phase = AttemptPhase::ResponseConsumption;
+                return;
+            }
+            FirstEvent::EmptyCompletion => self.terminal = ObservedTerminal::Done,
+            FirstEvent::Error(error) => self.terminal = ObservedTerminal::Error(error.kind),
+            FirstEvent::Closed => self.terminal = ObservedTerminal::ChannelClosed,
+            FirstEvent::Timeout => self.terminal = ObservedTerminal::FirstOutputTimeout,
+        }
+        self.pre_consumer_failure = true;
+        self.record("first_stream_event_failed");
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    pub(crate) fn observe_chunk(&mut self, chunk: &ChatEvent) {
+        if !chunk.content.is_empty() {
+            let elapsed = self.elapsed_ms();
+            self.first_observed_ms.get_or_insert(elapsed);
+            self.last_observed_ms = Some(elapsed);
+            self.content_events = self.content_events.saturating_add(1);
+            self.content_bytes = self.content_bytes.saturating_add(chunk.content.len());
+        }
+        if chunk.done {
+            self.terminal = ObservedTerminal::Done;
+        }
+    }
+
+    pub(crate) fn observe(&mut self, event: &Result<ChatEvent, GatewayError>) {
+        match event {
+            Ok(chunk) => self.observe_chunk(chunk),
+            Err(error) => self.terminal = ObservedTerminal::Error(error.kind),
+        }
+    }
+
+    pub(crate) fn reducer_finished(&mut self) {
+        if self.terminal == ObservedTerminal::Pending {
+            self.terminal = ObservedTerminal::ChannelClosed;
+        }
+        self.reducer_finished = true;
+        self.record("reducer_finished");
+    }
+
+    fn record(&self, boundary: &'static str) {
+        tracing::info!(
+            request_id = %self.request_id,
+            attempt_id = %self.attempt_id,
+            transport = ?self.transport,
+            phase = ?self.phase,
+            provider = %self.provider,
+            boundary,
+            observed_terminal = ?self.terminal,
+            content_events = self.content_events,
+            content_bytes = self.content_bytes,
+            first_observed_ms = ?self.first_observed_ms,
+            last_observed_ms = ?self.last_observed_ms,
+            observed_elapsed_ms = self.elapsed_ms(),
+            "provider response consumer observation"
+        );
+    }
+}
+
+impl Drop for AttemptDiagnostics {
+    fn drop(&mut self) {
+        if !self.reducer_finished && !self.pre_consumer_failure {
+            // This also covers a response dropped before its first poll.
+            // Do not infer why it was dropped or that the worker has stopped.
+            self.record("consumer_dropped_before_reducer_finish");
+        }
+    }
+}
+
+#[cfg(test)]
+mod attempt_diagnostics_tests {
+    use super::*;
+
+    fn diagnostics() -> AttemptDiagnostics {
+        AttemptDiagnostics::new(
+            "request-test".into(),
+            "chatgpt".into(),
+            Instant::now(),
+            AttemptTransport::Sse,
+        )
+    }
+
+    fn chunk(content: &str, done: bool) -> ChatEvent {
+        ChatEvent {
+            content: content.into(),
+            done,
+        }
+    }
+
+    #[test]
+    fn partial_error_uses_only_typed_category_and_content_lengths() {
+        let mut observed = diagnostics();
+        observed.observe_chunk(&chunk("é", false));
+        observed.observe(&Ok(chunk("", false)));
+        observed.observe(&Ok(chunk("abc", false)));
+        observed.observe(&Err(GatewayError::timeout("SECRET_SENTINEL")));
+        observed.reducer_finished();
+        assert_eq!(
+            observed.terminal,
+            ObservedTerminal::Error(crate::chat_backend::GatewayErrorKind::Timeout)
+        );
+        assert_eq!(observed.content_events, 2);
+        assert_eq!(observed.content_bytes, 5);
+        assert!(observed.first_observed_ms.is_some());
+        assert!(observed.last_observed_ms >= observed.first_observed_ms);
+        assert!(observed.reducer_finished);
+    }
+
+    #[test]
+    fn closed_channel_and_empty_terminal_are_not_conflated() {
+        let mut closed = diagnostics();
+        closed.reducer_finished();
+        assert_eq!(closed.terminal, ObservedTerminal::ChannelClosed);
+        assert_eq!(closed.first_observed_ms, None);
+
+        let mut empty = diagnostics();
+        empty.observe_chunk(&chunk("", true));
+        empty.reducer_finished();
+        assert_eq!(empty.terminal, ObservedTerminal::Done);
+        assert_eq!(empty.content_events, 0);
+        assert_eq!(empty.content_bytes, 0);
+    }
+
+    #[test]
+    fn unpolled_stream_drop_records_once_without_content_or_error_text() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Buffer(Arc::new(Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut observed = diagnostics();
+            observed.observe_chunk(&chunk("PRIVATE_CONTENT_SENTINEL", false));
+            let body = async_stream::stream! {
+                let mut observed = observed;
+                observed.reducer_finished();
+                yield ();
+            };
+            drop(body);
+
+            let mut failed = diagnostics();
+            failed.observe(&Err(GatewayError::timeout("PRIVATE_ERROR_SENTINEL")));
+            failed.reducer_finished();
+        });
+
+        let logged = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logged
+                .matches("provider response consumer observation")
+                .count(),
+            2
+        );
+        assert_eq!(
+            logged
+                .matches("consumer_dropped_before_reducer_finish")
+                .count(),
+            1
+        );
+        assert!(logged.contains("request-test"));
+        assert!(logged.contains("Error(Timeout)"));
+        assert!(!logged.contains("PRIVATE_CONTENT_SENTINEL"));
+        assert!(!logged.contains("PRIVATE_ERROR_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn json_collector_observes_typed_error_and_keeps_attempts_distinct() {
+        use crate::chat_backend::test_support::ScriptedBackend;
+
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![])));
+        let started = Instant::now();
+        let mut observed = AttemptDiagnostics::new(
+            "request-test".into(),
+            "chatgpt".into(),
+            started,
+            AttemptTransport::Json,
+        );
+        let (tx, rx) = mpsc::channel(2);
+        tx.send(Ok(chunk("first", false))).await.unwrap();
+        tx.send(Err(GatewayError::timeout("private error")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let collected = service
+            .collect_with_timeout_observed(rx, started, Duration::from_secs(2), &mut observed)
+            .await;
+        assert_eq!(collected.content, "first");
+        assert!(collected.error.is_some());
+        assert_eq!(observed.content_events, 1);
+        assert_eq!(observed.content_bytes, 5);
+        assert_eq!(
+            observed.terminal,
+            ObservedTerminal::Error(crate::chat_backend::GatewayErrorKind::Timeout)
+        );
+        assert!(observed.reducer_finished);
+
+        let next = diagnostics();
+        assert_ne!(next.attempt_id, observed.attempt_id);
+        assert_eq!(next.content_events, 0);
+        assert_eq!(next.terminal, ObservedTerminal::Pending);
+    }
+
+    #[test]
+    fn pre_consumer_failures_retain_phase_and_distinct_terminal_evidence() {
+        let mut admission = diagnostics();
+        admission.backend_admission_failed(&GatewayError::timeout("private"));
+        assert!(admission.pre_consumer_failure);
+        assert!(!admission.reducer_finished);
+        assert_eq!(
+            admission.terminal,
+            ObservedTerminal::Error(crate::chat_backend::GatewayErrorKind::Timeout)
+        );
+
+        let mut first = diagnostics();
+        first.backend_admitted();
+        first.observe_first_event(&FirstEvent::Timeout);
+        assert_eq!(first.terminal, ObservedTerminal::FirstOutputTimeout);
+        assert!(first.pre_consumer_failure);
+        assert_eq!(first.content_bytes, 0);
+
+        let mut success = diagnostics();
+        success.backend_admitted();
+        let id = success.attempt_id;
+        success.observe_first_event(&FirstEvent::Chunk(chunk("first", false)));
+        success.observe(&Ok(chunk("last", true)));
+        success.reducer_finished();
+        assert_eq!(success.attempt_id, id);
+        assert_eq!(success.content_events, 2);
+        assert_eq!(success.content_bytes, 9);
+        assert_eq!(success.terminal, ObservedTerminal::Done);
+    }
+
+    #[test]
+    fn admitted_first_chunk_is_observed_before_body_poll_and_not_a_commit() {
+        let mut observed = diagnostics();
+        observed.observe_chunk(&chunk("first", true));
+        assert_eq!(observed.terminal, ObservedTerminal::Done);
+        assert_eq!(observed.content_events, 1);
+        assert!(!observed.reducer_finished);
+        let next = diagnostics();
+        assert_eq!(next.terminal, ObservedTerminal::Pending);
+        assert_eq!(next.content_bytes, 0);
+        assert_eq!(next.first_observed_ms, None);
+    }
+}
+
 /// Keep provider timing metrics and completion logs identical for streaming
 /// and non-streaming requests. State transitions remain at the call site
 /// because stream errors carry additional session-expiry classification.
@@ -1015,20 +1366,32 @@ impl ChatService {
         events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
         attempt_started: Instant,
     ) -> CollectedResponse {
-        self.collect_inner(events, attempt_started, None).await
+        self.collect_inner(events, attempt_started, None, None)
+            .await
     }
 
-    /// Use the configured provider completion deadline in production. A
-    /// backend that keeps the channel open without a terminal event must not
-    /// hang an HTTP request forever. Dropping the receiver also cancels the
-    /// producer through the existing backend cancellation contract.
+    /// Deadline-bound collection without a diagnostic record for reducer tests.
+    #[cfg(test)]
     pub async fn collect_with_timeout(
         &self,
         events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
         attempt_started: Instant,
         max_wait: Duration,
     ) -> CollectedResponse {
-        self.collect_inner(events, attempt_started, Some(max_wait))
+        self.collect_inner(events, attempt_started, Some(max_wait), None)
+            .await
+    }
+
+    /// Production JSON collection uses the same reducer and absolute deadline.
+    /// Dropping the consumer closes its receiver; this is not worker cleanup proof.
+    pub(crate) async fn collect_with_timeout_observed(
+        &self,
+        events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+        attempt_started: Instant,
+        max_wait: Duration,
+        diagnostics: &mut AttemptDiagnostics,
+    ) -> CollectedResponse {
+        self.collect_inner(events, attempt_started, Some(max_wait), Some(diagnostics))
             .await
     }
 
@@ -1037,6 +1400,7 @@ impl ChatService {
         mut events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
         attempt_started: Instant,
         max_wait: Option<Duration>,
+        mut diagnostics: Option<&mut AttemptDiagnostics>,
     ) -> CollectedResponse {
         let mut accumulator = ResponseAccumulator::new(attempt_started);
         let deadline = max_wait.map(|budget| completion_deadline(attempt_started, budget));
@@ -1049,11 +1413,18 @@ impl ChatService {
             let Some(item) = next else {
                 break;
             };
+            if let Some(observed) = diagnostics.as_deref_mut() {
+                observed.observe(&item);
+            }
             if !matches!(accumulator.push(item), StreamUpdate::Delta(_)) {
                 break;
             }
         }
-        accumulator.finish()
+        let collected = accumulator.finish();
+        if let Some(observed) = diagnostics {
+            observed.reducer_finished();
+        }
+        collected
     }
 }
 
