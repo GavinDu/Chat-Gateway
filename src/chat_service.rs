@@ -2220,7 +2220,7 @@ mod optional_memory_context_priority_tests {
         let denied = memory_egress::MemoryEgressPolicy::from_allowlist("").unwrap();
         let allowed = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt").unwrap();
         let baseline =
-            prepare_chat_context_with_policy(&state, owner, None, &incoming, denied.clone())
+            prepare_chat_context_with_policy(&state, owner, None, &incoming, denied)
                 .await
                 .unwrap();
         let with_memory =
