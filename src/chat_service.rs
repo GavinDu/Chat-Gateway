@@ -248,6 +248,44 @@ mod attempt_diagnostics_tests {
         assert!(!logged.contains("PRIVATE_ERROR_SENTINEL"));
     }
 
+    #[tokio::test]
+    async fn json_collector_observes_typed_error_and_keeps_attempts_distinct() {
+        use crate::chat_backend::test_support::ScriptedBackend;
+
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![])));
+        let started = Instant::now();
+        let mut observed = AttemptDiagnostics::new(
+            "request-test".into(),
+            "chatgpt".into(),
+            started,
+            AttemptTransport::Json,
+        );
+        let (tx, rx) = mpsc::channel(2);
+        tx.send(Ok(chunk("first", false))).await.unwrap();
+        tx.send(Err(GatewayError::timeout("private error")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let collected = service
+            .collect_with_timeout_observed(rx, started, Duration::from_secs(2), &mut observed)
+            .await;
+        assert_eq!(collected.content, "first");
+        assert!(collected.error.is_some());
+        assert_eq!(observed.content_events, 1);
+        assert_eq!(observed.content_bytes, 5);
+        assert_eq!(
+            observed.terminal,
+            ObservedTerminal::Error(crate::chat_backend::GatewayErrorKind::Timeout)
+        );
+        assert!(observed.reducer_finished);
+
+        let next = diagnostics();
+        assert_ne!(next.attempt_id, observed.attempt_id);
+        assert_eq!(next.content_events, 0);
+        assert_eq!(next.terminal, ObservedTerminal::Pending);
+    }
+
     #[test]
     fn admitted_first_chunk_is_observed_before_body_poll_and_not_a_commit() {
         let mut observed = diagnostics();
@@ -1202,10 +1240,7 @@ impl ChatService {
             .await
     }
 
-    /// Use the configured provider completion deadline in production. A
-    /// backend that keeps the channel open without a terminal event must not
-    /// hang an HTTP request forever. Dropping the receiver also cancels the
-    /// producer through the existing backend cancellation contract.
+    /// Deadline-bound collection without a diagnostic record for reducer tests.
     #[cfg(test)]
     pub async fn collect_with_timeout(
         &self,
@@ -1217,6 +1252,8 @@ impl ChatService {
             .await
     }
 
+    /// Production JSON collection uses the same reducer and absolute deadline.
+    /// Dropping the consumer closes its receiver; this is not worker cleanup proof.
     pub(crate) async fn collect_with_timeout_observed(
         &self,
         events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
