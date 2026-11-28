@@ -605,7 +605,10 @@ fn budget_versioned_memory_items(
     token_budget: usize,
 ) -> (Vec<CachedPersonalMemoryItem>, usize) {
     let (selected, used) = budget_personal_memory_items(
-        items.iter().map(|versioned| versioned.item.clone()).collect(),
+        items
+            .iter()
+            .map(|versioned| versioned.item.clone())
+            .collect(),
         token_budget,
     );
     let cached = selected
