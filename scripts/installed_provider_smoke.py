@@ -384,6 +384,143 @@ def execute(
     return _report("completed", identity, results)
 
 
+# Offline incident evidence only. Each attempted intervention starts from a
+# separately observed failing state, never an automatic replay of a prompt.
+COHORT_CONTROLS = ("ordinary_retry", "matched_delay", "client_restart",
+                   "transport_reset", "direct_api")
+MAX_COHORT_ROWS = 100
+COHORT_STATES = ("client", "gateway", "helper", "transport", "workload",
+                 "history", "model")
+COHORT_SKIP_REASONS = ("not_authorized", "not_supported", "not_reproduced",
+                       "ambiguous_submission", "rate_limited", "challenge",
+                       "budget_exhausted", "confounded")
+COHORT_OUTCOMES = ("recovered", "failed", "not_observed")
+
+
+def _cohort_uuid(value):
+    # Use the same strict canonical UUID boundary as live response headers.
+    if not isinstance(value, str) or _request_id({"X-Request-Id": value}) is None:
+        raise SmokeFailure("invalid_cohort")
+    return value
+
+
+def _cohort_int(value, maximum=86_400_000):
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise SmokeFailure("invalid_cohort")
+    return value
+
+
+def _cohort_keys(value, required, optional=()):
+    if (not isinstance(value, dict) or not set(required) <= value.keys()
+            or not value.keys() <= set(required) | set(optional)):
+        raise SmokeFailure("invalid_cohort")
+
+
+def _cohort_state(value):
+    _cohort_keys(value, COHORT_STATES)
+    return {key: _cohort_uuid(value[key]) for key in COHORT_STATES}
+
+
+def validate_opencode_cohorts(manifest: dict) -> dict:
+    """Validate an owner-prepared, content-free offline incident manifest.
+
+    A validated manifest is not live proof. IDs are locally scoped random
+    pseudonyms, except request IDs sourced from actual gateway headers.
+    No network, process control or provider requests are performed here.
+    """
+    _cohort_keys(manifest, ("schema_version", "provider", "source_sha", "rows"))
+    if (type(manifest["schema_version"]) is not int
+            or manifest["schema_version"] != 1
+            or manifest["provider"] not in FOCUS_PROVIDERS
+            or not isinstance(manifest["source_sha"], str)
+            or SHA_PATTERN.fullmatch(manifest["source_sha"]) is None
+            or not isinstance(manifest["rows"], list)
+            or not 1 <= len(manifest["rows"]) <= MAX_COHORT_ROWS):
+        raise SmokeFailure("invalid_cohort")
+    rows = []
+    seen = set()
+    controls = set()
+    restart_delays = []
+    matched_delays = []
+    for entry in manifest["rows"]:
+        _cohort_keys(entry, ("cohort_id", "control", "status"),
+                     ("skip_reason", "baseline_request_id", "result_request_id",
+                      "before", "after", "delay_ms", "successes",
+                      "recurrence_ms", "outcome"))
+        cohort_id = _cohort_uuid(entry["cohort_id"])
+        control = entry["control"]
+        status = entry["status"]
+        if (cohort_id in seen or control not in COHORT_CONTROLS
+                or status not in ("observed", "skipped")):
+            raise SmokeFailure("invalid_cohort")
+        seen.add(cohort_id)
+        controls.add(control)
+        row = {"cohort_id": cohort_id, "control": control, "status": status}
+        if status == "skipped":
+            _cohort_keys(entry, ("cohort_id", "control", "status", "skip_reason"))
+            if entry["skip_reason"] not in COHORT_SKIP_REASONS:
+                raise SmokeFailure("invalid_cohort")
+            row["skip_reason"] = entry["skip_reason"]
+            rows.append(row)
+            continue
+        _cohort_keys(entry, ("cohort_id", "control", "status",
+                            "baseline_request_id", "result_request_id",
+                            "before", "after", "delay_ms", "successes",
+                            "recurrence_ms", "outcome"))
+        baseline = _cohort_uuid(entry["baseline_request_id"])
+        result = _cohort_uuid(entry["result_request_id"])
+        if baseline == result or baseline in seen or result in seen:
+            raise SmokeFailure("invalid_cohort")
+        seen.update((baseline, result))
+        before = _cohort_state(entry["before"])
+        after = _cohort_state(entry["after"])
+        changed = {key for key in COHORT_STATES if before[key] != after[key]}
+        expected = {
+            "ordinary_retry": set(), "matched_delay": set(),
+            "client_restart": {"client", "transport"},
+            "transport_reset": {"transport"},
+            "direct_api": {"client", "transport"},
+        }[control]
+        delay = _cohort_int(entry["delay_ms"])
+        successes = _cohort_int(entry["successes"], 1000)
+        recurrence = entry["recurrence_ms"]
+        if recurrence is not None:
+            recurrence = _cohort_int(recurrence)
+        outcome = entry["outcome"]
+        if (outcome not in COHORT_OUTCOMES
+                or (outcome == "recovered" and successes == 0)
+                or (outcome == "not_observed" and (successes or recurrence is not None))
+                or (recurrence is not None and successes == 0)):
+            raise SmokeFailure("invalid_cohort")
+        isolated = changed == expected
+        if isolated and control == "client_restart":
+            restart_delays.append(delay)
+        if isolated and control == "matched_delay":
+            matched_delays.append(delay)
+        row.update(baseline_request_id=baseline, result_request_id=result,
+                   changed_dimensions=sorted(changed), isolated=isolated,
+                   delay_ms=delay, successes=successes, recurrence_ms=recurrence,
+                   outcome=outcome)
+        rows.append(row)
+    # Require baseline and all controls to be explicitly observed or skipped.
+    # Missing controls must not silently become successful evidence.
+    if controls != set(COHORT_CONTROLS):
+        raise SmokeFailure("invalid_cohort")
+    delay_match = bool(restart_delays and matched_delays) and all(
+        any(abs(delay - restart) <= 250 for delay in matched_delays)
+        for restart in restart_delays
+    )
+    return {"schema_version": 1, "phase": "offline_cohort_validation",
+            "provider": manifest["provider"], "source_sha": manifest["source_sha"],
+            "rows": rows, "matched_delay_within_250ms": delay_match,
+            "live_verified": False, "provider_requests_sent": 0}
+
+
+def _read_cohort_manifest(path: str) -> dict:
+    with open(path, "rb") as source:
+        return _json_document(_read_limited(source))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get(
@@ -397,7 +534,19 @@ def main() -> int:
                         help="Optional 40-lowercase-hex running binary source SHA; mismatch prevents sends")
     parser.add_argument("--providers", default="chatgpt,metaai",
                         help="Comma-separated explicit provider allowlist (default: chatgpt,metaai)")
+    parser.add_argument("--validate-opencode-cohorts", metavar="PATH",
+                        help="Validate an offline redacted incident manifest; never send requests")
     args = parser.parse_args()
+    if args.validate_opencode_cohorts is not None:
+        try:
+            if args.execute or args.repeat:
+                raise SmokeFailure("invalid_cohort")
+            report = validate_opencode_cohorts(_read_cohort_manifest(args.validate_opencode_cohorts))
+        except (OSError, ValueError, TypeError, SmokeFailure, RecursionError):
+            print(json.dumps({"phase": "offline_cohort_invalid", "provider_requests_sent": 0}))
+            return 1
+        print(json.dumps(report, sort_keys=True))
+        return 0
     try:
         selected = parse_selected_providers(args.providers)
     except SmokeFailure:
