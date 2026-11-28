@@ -23,13 +23,8 @@ pub(super) async fn json_provider_response(
         prompt_tokens,
         receiver,
         thread_observation,
+        mut diagnostics,
     } = attempt;
-    let mut diagnostics = chat_service::AttemptDiagnostics::new(
-        request_id.to_owned(),
-        provider.to_owned(),
-        provider_started,
-        chat_service::AttemptTransport::Json,
-    );
     let collected = state
         .chat_service
         .collect_with_timeout_observed(
